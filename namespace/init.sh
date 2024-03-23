@@ -50,7 +50,10 @@ sudo iptables -A FORWARD -o $INTERFACE -i veth0 -j ACCEPT
 # 100 test <- add this line
 
 # remove the default routing rules
+echo removing default gateway
 sudo ip route del default dev $INTERFACE
+echo showing routing table
+sudo ip route show
 
 # add a rule to route only if it comes from eth1
 sudo ip rule add from 192.168.0.2 table test
