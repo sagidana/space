@@ -1,6 +1,5 @@
 import grp
 import os
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -81,9 +80,15 @@ def get_rules_text() -> str:
 # ── run-with-internet ──────────────────────────────────────────────────────────
 
 def run_with_internet(command: list[str], group: str) -> None:
-    """Replace the current process with the command running under the internet group."""
-    cmd_str = " ".join(shlex.quote(arg) for arg in command)
-    os.execvp("sg", ["sg", group, "-c", cmd_str])
+    """Replace the current process with the command running under the internet group.
+
+    Sets only the effective GID (not the real GID) so that iptables --gid-owner
+    matches while D-Bus, SO_PEERCRED, and other IPC mechanisms still see the
+    user's real primary group.
+    """
+    internet_gid = grp.getgrnam(group).gr_gid
+    os.setegid(internet_gid)
+    os.execvp(command[0], command)
 
 
 # ── wrapper script ─────────────────────────────────────────────────────────────
@@ -94,7 +99,13 @@ WRAPPER_PATH = "/usr/local/bin/inet"
 def install_wrapper(group: str) -> None:
     script = f"""#!/bin/bash
 # Run a command with internet access (managed by space)
-exec sg {group} -c "$*"
+# Sets only the effective GID so iptables matches while real GID stays intact
+# (preserves D-Bus auth, SO_PEERCRED, and other IPC that checks real GID)
+exec python3 -c "
+import grp, os, sys
+os.setegid(grp.getgrnam('{group}').gr_gid)
+os.execvp(sys.argv[1], sys.argv[1:])
+" "$@"
 """
     with open(WRAPPER_PATH, "w") as f:
         f.write(script)
