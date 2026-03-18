@@ -327,10 +327,11 @@ def panic():
     No confirmation prompt — runs immediately.
     """
     require_root()
-    subprocess.run(["iptables", "-F", "OUTPUT"])
-    subprocess.run(["iptables", "-P", "OUTPUT", "ACCEPT"])
-    subprocess.run(["iptables", "-F", "FORWARD"])
-    subprocess.run(["iptables", "-t", "nat", "-F"])
+    for ipt in ("iptables", "ip6tables"):
+        subprocess.run([ipt, "-F", "OUTPUT"])
+        subprocess.run([ipt, "-P", "OUTPUT", "ACCEPT"])
+        subprocess.run([ipt, "-F", "FORWARD"])
+        subprocess.run([ipt, "-t", "nat", "-F"])
     console.print("[green]✓ All rules cleared. Full internet access restored.[/green]")
 
 

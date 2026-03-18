@@ -28,8 +28,13 @@ def _ipt(*args):
     subprocess.run(["iptables", *args], check=True)
 
 
+def _ip6t(*args):
+    subprocess.run(["ip6tables", *args], check=True)
+
+
 def apply_rules(subnets: list[str], group: str) -> None:
     """Block all outbound internet traffic; allow loopback, LAN, and the internet group."""
+    # ── IPv4 ──────────────────────────────────────────────────────────────────
     _ipt("-F", "OUTPUT")
     _ipt("-P", "OUTPUT", "ACCEPT")          # reset policy first
 
@@ -42,11 +47,25 @@ def apply_rules(subnets: list[str], group: str) -> None:
     _ipt("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT")
     _ipt("-A", "OUTPUT", "-j", "DROP")
 
+    # ── IPv6 ──────────────────────────────────────────────────────────────────
+    _ip6t("-F", "OUTPUT")
+    _ip6t("-P", "OUTPUT", "ACCEPT")         # reset policy first
+
+    _ip6t("-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT")
+    # Allow link-local (needed for neighbour discovery / ICMPv6)
+    _ip6t("-A", "OUTPUT", "-d", "fe80::/10", "-j", "ACCEPT")
+
+    _ip6t("-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+    _ip6t("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT")
+    _ip6t("-A", "OUTPUT", "-j", "DROP")
+
 
 def remove_rules() -> None:
     """Flush OUTPUT chain and restore ACCEPT policy."""
     _ipt("-F", "OUTPUT")
     _ipt("-P", "OUTPUT", "ACCEPT")
+    _ip6t("-F", "OUTPUT")
+    _ip6t("-P", "OUTPUT", "ACCEPT")
 
 
 def save_rules() -> None:
@@ -55,26 +74,29 @@ def save_rules() -> None:
 
 
 def is_blocking() -> bool:
-    """Return True if a DROP rule exists in the OUTPUT chain."""
-    try:
-        result = subprocess.run(
-            ["iptables", "-L", "OUTPUT", "-n"],
-            capture_output=True, text=True, check=True,
-        )
-        return "DROP" in result.stdout
-    except Exception:
-        return False
+    """Return True if a DROP rule exists in the OUTPUT chain (IPv4 or IPv6)."""
+    for cmd in (["iptables", "-L", "OUTPUT", "-n"], ["ip6tables", "-L", "OUTPUT", "-n"]):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            if "DROP" in result.stdout:
+                return True
+        except Exception:
+            pass
+    return False
 
 
 def get_rules_text() -> str:
-    try:
-        result = subprocess.run(
-            ["iptables", "-L", "OUTPUT", "-n", "--line-numbers"],
-            capture_output=True, text=True, check=True,
-        )
-        return result.stdout
-    except Exception as e:
-        return str(e)
+    parts = []
+    for label, cmd in (
+        ("iptables", ["iptables", "-L", "OUTPUT", "-n", "--line-numbers"]),
+        ("ip6tables", ["ip6tables", "-L", "OUTPUT", "-n", "--line-numbers"]),
+    ):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            parts.append(f"-- {label} --\n{result.stdout}")
+        except Exception as e:
+            parts.append(f"-- {label} --\n{e}")
+    return "\n".join(parts)
 
 
 # ── run-with-internet ──────────────────────────────────────────────────────────
