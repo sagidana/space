@@ -63,14 +63,14 @@ def _shell_rc_file(username: str) -> Path | None:
 def install_shell_alias(username: str, space_bin: Path) -> tuple[bool, str]:
     """Append `alias space='sudo <space_bin>'` to the user's shell rc file."""
     rc = _shell_rc_file(username)
+    alias_line = f'alias space=\'sudo -E PATH="$PATH" {space_bin}\''
     if rc is None:
         shell = Path(pwd.getpwnam(username).pw_shell).name
         return False, (
             f"Unsupported shell '{shell}' — add manually: "
-            f"alias space='sudo {space_bin}'"
+            + alias_line
         )
 
-    alias_line = f"alias space='sudo {space_bin}'"
     if rc.exists() and (_ALIAS_MARKER in rc.read_text() or alias_line in rc.read_text()):
         return True, f"Alias already present in {rc}"
 
