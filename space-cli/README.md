@@ -45,8 +45,9 @@ This will:
 2. Create the `internet` Linux group and add you to it
 3. Apply iptables rules
 4. Install the `/usr/local/bin/inet` shortcut wrapper
+5. Add `alias space='sudo /path/to/space'` to your `~/.bashrc` or `~/.zshrc` so you can type `space` directly without prefixing `sudo` every time
 
-Then open a new shell (or run `newgrp internet`) for group membership to take effect.
+Then open a new shell (or run `newgrp internet`) for group membership and the alias to take effect.
 
 ### Persist rules across reboots
 

@@ -1,6 +1,8 @@
 import os
+import pwd
 import subprocess
 import sys
+from pathlib import Path
 
 import click
 from rich.console import Console
@@ -38,6 +40,71 @@ def need_init(config):
             "[yellow]space is not initialized. Run [bold]sudo space init[/bold] first.[/yellow]"
         )
         sys.exit(1)
+
+
+_ALIAS_MARKER = "# added by space"
+
+
+def _shell_rc_file(username: str) -> Path | None:
+    """Return the rc file for the user's login shell, or None if unsupported."""
+    try:
+        entry = pwd.getpwnam(username)
+        home = Path(entry.pw_dir)
+        shell = Path(entry.pw_shell).name
+    except KeyError:
+        return None
+    if shell in ("bash",):
+        return home / ".bashrc"
+    if shell in ("zsh",):
+        return home / ".zshrc"
+    return None
+
+
+def install_shell_alias(username: str, space_bin: Path) -> tuple[bool, str]:
+    """Append `alias space='sudo <space_bin>'` to the user's shell rc file."""
+    rc = _shell_rc_file(username)
+    if rc is None:
+        shell = Path(pwd.getpwnam(username).pw_shell).name
+        return False, (
+            f"Unsupported shell '{shell}' — add manually: "
+            f"alias space='sudo {space_bin}'"
+        )
+
+    alias_line = f"alias space='sudo {space_bin}'"
+    if rc.exists() and (_ALIAS_MARKER in rc.read_text() or alias_line in rc.read_text()):
+        return True, f"Alias already present in {rc}"
+
+    with rc.open("a") as f:
+        f.write(f"\n{_ALIAS_MARKER}\n{alias_line}\n")
+    return True, f"Added alias to {rc}"
+
+
+def remove_shell_alias(username: str) -> bool:
+    """Remove the alias block previously written by install_shell_alias."""
+    try:
+        rc = _shell_rc_file(username)
+    except Exception:
+        return False
+    if rc is None or not rc.exists():
+        return False
+
+    lines = rc.read_text().splitlines(keepends=True)
+    filtered = []
+    skip_next = False
+    for line in lines:
+        if line.strip() == _ALIAS_MARKER:
+            skip_next = True
+            # also drop the preceding blank line we added
+            if filtered and filtered[-1].strip() == "":
+                filtered.pop()
+            continue
+        if skip_next and line.startswith("alias space="):
+            skip_next = False
+            continue
+        filtered.append(line)
+
+    rc.write_text("".join(filtered))
+    return True
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -123,6 +190,15 @@ def init():
     })
     save_config(config)
     console.print("[green]✓[/green] Saved config to ~/.config/space/config.json")
+
+    # Install shell alias so the user can type `space` instead of `sudo space`
+    space_bin = Path(sys.executable).parent / "space"
+    if username and space_bin.exists():
+        ok, msg = install_shell_alias(username, space_bin)
+        if ok:
+            console.print(f"[green]✓[/green] {msg}")
+        else:
+            console.print(f"[yellow]![/yellow] Shell alias skipped: {msg}")
 
     console.print()
     console.print("[bold green]Done![/bold green]")
@@ -353,6 +429,11 @@ def uninstall():
 
     firewall.remove_wrapper()
     console.print("[green]✓ Removed /usr/local/bin/inet.[/green]")
+
+    config = load_config()
+    username = config.get("username") or os.environ.get("SUDO_USER") or os.environ.get("USER")
+    if username and remove_shell_alias(username):
+        console.print("[green]✓ Removed shell alias.[/green]")
 
     console.print("[dim]Config preserved at ~/.config/space/config.json[/dim]")
     console.print("[dim]Group 'internet' preserved (remove manually with: sudo groupdel internet)[/dim]")
