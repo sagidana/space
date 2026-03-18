@@ -86,6 +86,7 @@ sudo space shell --shell /bin/zsh   # use a different shell
 ```bash
 sudo space on     # enable blocking (default after init)
 sudo space off    # disable blocking (allow all traffic)
+sudo space panic  # emergency: clear all rules immediately, no confirmation prompt
 ```
 
 ### Show status
@@ -137,6 +138,7 @@ sudo groupdel internet        # optional: remove the group
 | `space shell` | yes | Launch a shell with full internet access (sudo-safe) |
 | `space subnet` | yes | Re-detect or update LAN subnets |
 | `space save` | yes | Persist rules via `netfilter-persistent` |
+| `space panic` | yes | Emergency: clear all rules, restore full internet access immediately |
 | `space uninstall` | yes | Remove rules and `inet` wrapper |
 
 ## Notes
