@@ -195,6 +195,26 @@ def remove_rules() -> None:
         )
 
 
+def panic_flush() -> None:
+    """Nuclear reset: flush every rule in every chain of every table, delete all
+    user-defined chains, and reset all built-in chain policies to ACCEPT.
+    After this call every table and every chain is completely empty."""
+    tables = ["filter", "nat", "mangle", "raw", "security"]
+    builtin_chains = {
+        "filter":   ["INPUT", "FORWARD", "OUTPUT"],
+        "nat":      ["PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"],
+        "mangle":   ["PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"],
+        "raw":      ["PREROUTING", "OUTPUT"],
+        "security": ["INPUT", "FORWARD", "OUTPUT"],
+    }
+    for cmd in ("iptables", "ip6tables"):
+        for table in tables:
+            subprocess.run([cmd, "-t", table, "-F"], capture_output=True)
+            subprocess.run([cmd, "-t", table, "-X"], capture_output=True)
+            for chain in builtin_chains[table]:
+                subprocess.run([cmd, "-t", table, "-P", chain, "ACCEPT"], capture_output=True)
+
+
 def save_rules() -> None:
     """Persist rules via netfilter-persistent (iptables-persistent package)."""
     subprocess.run(["netfilter-persistent", "save"], check=True)

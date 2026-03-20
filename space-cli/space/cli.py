@@ -455,7 +455,7 @@ def panic():
     No confirmation prompt — runs immediately.
     """
     ensure_root()
-    firewall.remove_rules()
+    firewall.panic_flush()
     console.print("[green]✓ All rules cleared. Full internet access restored.[/green]")
 
 
