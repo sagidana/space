@@ -4,6 +4,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import signal
 import subprocess
 from pathlib import Path
@@ -28,6 +29,16 @@ def add_user_to_group(username: str, group: str) -> None:
 
 
 # ── iptables helpers ───────────────────────────────────────────────────────────
+
+def get_wan_interface() -> str | None:
+    """Return the interface used for the default route (the internet-facing NIC)."""
+    result = subprocess.run(
+        ["ip", "route", "get", "8.8.8.8"],
+        capture_output=True, text=True,
+    )
+    m = re.search(r'\bdev\s+(\S+)', result.stdout)
+    return m.group(1) if m else None
+
 
 def _ipt(*args):
     subprocess.run(["iptables", *args], check=True)
@@ -64,6 +75,15 @@ def apply_rules(subnets: list[str], group: str) -> None:
     _ip6t("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT")
     _ip6t("-A", "OUTPUT", "-j", "DROP")
 
+    # ── FORWARD (containers / VMs routed through the host) ────────────────────
+    # Insert at position 1 so our DROP precedes any ACCEPT rules added by Docker
+    # or other tools. We match on the WAN interface (the default-route NIC) so
+    # we block all forwarded internet traffic regardless of source subnet.
+    wan = get_wan_interface()
+    if wan:
+        _ipt("-I", "FORWARD", "1", "-o", wan, "-j", "DROP")
+        _ip6t("-I", "FORWARD", "1", "-o", wan, "-j", "DROP")
+
 
 def remove_rules() -> None:
     """Flush OUTPUT chain and restore ACCEPT policy."""
@@ -72,6 +92,14 @@ def remove_rules() -> None:
     _ip6t("-F", "OUTPUT")
     _ip6t("-P", "OUTPUT", "ACCEPT")
 
+    # Remove the FORWARD DROP rule inserted by apply_rules. Use -D (delete by
+    # spec) rather than flushing the whole chain — Docker and other tools may
+    # have legitimate rules in FORWARD that we must not disturb.
+    wan = get_wan_interface()
+    if wan:
+        subprocess.run(["iptables",  "-D", "FORWARD", "-o", wan, "-j", "DROP"], capture_output=True)
+        subprocess.run(["ip6tables", "-D", "FORWARD", "-o", wan, "-j", "DROP"], capture_output=True)
+
 
 def save_rules() -> None:
     """Persist rules via netfilter-persistent (iptables-persistent package)."""
@@ -79,8 +107,13 @@ def save_rules() -> None:
 
 
 def is_blocking() -> bool:
-    """Return True if a DROP rule exists in the OUTPUT chain (IPv4 or IPv6)."""
-    for cmd in (["iptables", "-L", "OUTPUT", "-n"], ["ip6tables", "-L", "OUTPUT", "-n"]):
+    """Return True if a DROP rule exists in the OUTPUT or FORWARD chain (IPv4 or IPv6)."""
+    for cmd in (
+        ["iptables",  "-L", "OUTPUT",  "-n"],
+        ["ip6tables", "-L", "OUTPUT",  "-n"],
+        ["iptables",  "-L", "FORWARD", "-n"],
+        ["ip6tables", "-L", "FORWARD", "-n"],
+    ):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
             if "DROP" in result.stdout:
@@ -93,8 +126,10 @@ def is_blocking() -> bool:
 def get_rules_text() -> str:
     parts = []
     for label, cmd in (
-        ("iptables", ["iptables", "-L", "OUTPUT", "-n", "--line-numbers"]),
-        ("ip6tables", ["ip6tables", "-L", "OUTPUT", "-n", "--line-numbers"]),
+        ("iptables OUTPUT",   ["iptables",  "-L", "OUTPUT",  "-n", "--line-numbers"]),
+        ("ip6tables OUTPUT",  ["ip6tables", "-L", "OUTPUT",  "-n", "--line-numbers"]),
+        ("iptables FORWARD",  ["iptables",  "-L", "FORWARD", "-n", "--line-numbers"]),
+        ("ip6tables FORWARD", ["ip6tables", "-L", "FORWARD", "-n", "--line-numbers"]),
     ):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
