@@ -11,7 +11,7 @@ from rich.table import Table
 
 from . import firewall
 from .config import load as load_config, save as save_config
-from .network import get_local_subnets
+from .network import get_local_subnets, get_system_dns
 
 console = Console()
 
@@ -92,6 +92,15 @@ def init():
         console.print("[red]No subnets provided. Aborting.[/red]")
         sys.exit(1)
 
+    # ── DNS detection ─────────────────────────────────────────────────────────
+    detected_dns = get_system_dns()
+    if detected_dns:
+        console.print(f"[green]Detected system DNS:[/green] {detected_dns}")
+    else:
+        console.print("[yellow]Could not auto-detect system DNS. Falling back to 8.8.8.8.[/yellow]")
+        detected_dns = "8.8.8.8"
+    dns = Prompt.ask("DNS server for internet namespace", default=detected_dns)
+
     # ── group name ────────────────────────────────────────────────────────────
     group = Prompt.ask("Internet-access group name", default="internet")
 
@@ -103,6 +112,7 @@ def init():
     console.print("[bold]Summary[/bold]")
     real_bin = Path(shutil.which(sys.argv[0]) or sys.argv[0]).resolve()
     console.print(f"  LAN subnets  : {', '.join(subnets)}")
+    console.print(f"  DNS          : {dns}")
     console.print(f"  Group        : {group}")
     console.print(f"  Add user     : {username or '(unknown)'}")
     console.print(f"  Wrapper      : /usr/local/bin/inet")
@@ -132,6 +142,7 @@ def init():
 
     config.update({
         "subnets": subnets,
+        "dns": dns,
         "group": group,
         "initialized": True,
         "wrapper_installed": True,
@@ -214,6 +225,7 @@ def status():
         "[red]yes[/red]" if blocking else "[green]no[/green]",
     )
     table.add_row("LAN subnets", ", ".join(config.get("subnets", [])) or "[dim]-[/dim]")
+    table.add_row("Namespace DNS", config.get("dns") or "[dim]-[/dim]")
     table.add_row("Internet group", config.get("group") or "[dim]-[/dim]")
     table.add_row(
         "inet wrapper",
@@ -254,7 +266,7 @@ def run(command):
 @main.command(
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True}
 )
-@click.option("--dns", default="8.8.8.8", show_default=True, help="DNS server to use inside the shell.")
+@click.option("--dns", default=None, help="DNS server to use inside the shell (overrides saved config).")
 @click.option("--shell", "shell_bin", default="/bin/bash", show_default=True, help="Shell binary to launch.")
 @click.argument("command", nargs=-1)
 def shell(dns, shell_bin, command):
@@ -274,6 +286,9 @@ def shell(dns, shell_bin, command):
     ensure_root()
     config = load_config()
     need_init(config)
+
+    if dns is None:
+        dns = config.get("dns") or "8.8.8.8"
 
     username = os.environ.get("SUDO_USER") or os.environ.get("USER")
     if not username or username == "root":

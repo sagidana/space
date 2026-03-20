@@ -42,10 +42,13 @@ sudo space init
 
 This will:
 1. Auto-detect your LAN subnets (e.g. `192.168.1.0/24`) and ask you to confirm
-2. Create the `internet` Linux group and add you to it
-3. Apply iptables rules
-4. Install the `/usr/local/bin/inet` shortcut wrapper
-5. Add `alias space='sudo /path/to/space'` to your `~/.bashrc` or `~/.zshrc` so you can type `space` directly without prefixing `sudo` every time
+2. Auto-detect your system DNS server and ask you to confirm
+3. Create the `internet` Linux group and add you to it
+4. Apply iptables rules
+5. Install the `/usr/local/bin/inet` shortcut wrapper
+6. Add `alias space='sudo /path/to/space'` to your `~/.bashrc` or `~/.zshrc` so you can type `space` directly without prefixing `sudo` every time
+
+The detected DNS is saved to config and used automatically by `space shell`. On systems using `systemd-resolved` (where `/etc/resolv.conf` points to `127.0.0.53`), the real upstream DNS is read from `/run/systemd/resolve/resolv.conf` instead.
 
 Then open a new shell (or run `newgrp internet`) for group membership and the alias to take effect.
 
@@ -76,9 +79,11 @@ sudo space shell
 Opens an interactive shell where **everything has internet access** — including `sudo apt update`, background processes, and any subcommand. Uses a temporary network namespace under the hood; the namespace is torn down automatically when you exit the shell.
 
 ```bash
-sudo space shell --dns 1.1.1.1      # use a different DNS server
+sudo space shell --dns 1.1.1.1      # override DNS for this session
 sudo space shell --shell /bin/zsh   # use a different shell
 ```
+
+The DNS defaults to whatever was saved during `space init`. You only need `--dns` if you want to override it for a specific session.
 
 > **Why this works for sudo:** The network namespace is inherited by all child processes regardless of UID/GID changes. Unlike the `sg`-based approach, sudo inside the shell stays in the same namespace.
 
@@ -100,6 +105,7 @@ space status
   Initialized        yes
   Blocking internet  yes
   LAN subnets        192.168.1.0/24
+  Namespace DNS      192.168.1.1
   Internet group     internet
   inet wrapper       /usr/local/bin/inet
 
@@ -144,7 +150,7 @@ sudo groupdel internet        # optional: remove the group
 
 ## Notes
 
-- **DNS**: If your router (e.g. `192.168.1.1`) serves DNS, it is already covered by the LAN rule. If you use a public DNS like `8.8.8.8`, either add it as a subnet or point `/etc/resolv.conf` to your router.
+- **DNS**: `space init` auto-detects your system DNS and saves it to config. It handles `systemd-resolved` transparently — if `/etc/resolv.conf` points to `127.0.0.53`, the real upstream server is read from `/run/systemd/resolve/resolv.conf`. The saved DNS is used by `space shell`; override it per-session with `--dns`.
 - **sudo + internet**: `sudo` drops group membership by default. Use `sudo sg internet -c "apt update"` or configure `sudo` to preserve groups.
 - **IPv6**: Only IPv4 is managed. If you use IPv6, apply equivalent rules with `ip6tables` manually.
 - **Config location**: `~/.config/space/config.json` (always stored as the real user, even when run via sudo).

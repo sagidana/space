@@ -5,6 +5,7 @@ from pathlib import Path
 
 DEFAULTS = {
     "subnets": [],
+    "dns": None,
     "group": "internet",
     "initialized": False,
     "wrapper_installed": False,
