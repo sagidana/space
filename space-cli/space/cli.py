@@ -31,7 +31,7 @@ def ensure_root():
     console.print("[yellow]Root privileges required. Re-running with sudo...[/yellow]")
     argv0 = shutil.which(sys.argv[0]) or sys.argv[0]
     try:
-        os.execvp("sudo", ["sudo", argv0] + sys.argv[1:])
+        os.execvp("sudo", ["sudo", "-E", argv0] + sys.argv[1:])
     except Exception as e:
         console.print(f"[red]Failed to escalate to root:[/red] {e}")
         sys.exit(1)
@@ -252,31 +252,29 @@ def shell(dns, shell_bin):
     \b
     All commands inside — including sudo — have internet access.
     The namespace is torn down automatically when you exit the shell.
-
-    Requires sudo to set up the network namespace.
     """
-    require_root()
+    ensure_root()
     config = load_config()
     need_init(config)
 
     username = os.environ.get("SUDO_USER") or os.environ.get("USER")
     if not username or username == "root":
-        console.print("[red]Could not determine the real user. Run with sudo.[/red]")
-        import sys; sys.exit(1)
+        console.print("[red]Could not determine the real user.[/red]")
+        sys.exit(1)
 
     console.print(f"[cyan]Setting up internet namespace...[/cyan]")
     try:
         firewall.setup_internet_namespace(dns=dns)
     except Exception as e:
         console.print(f"[red]Failed to set up namespace:[/red] {e}")
-        import sys; sys.exit(1)
+        sys.exit(1)
 
     console.print(f"[green]Entering internet shell[/green] [dim](exit to return)[/dim]\n")
     try:
         firewall.run_internet_shell(username, shell=shell_bin)
     finally:
-        firewall.teardown_internet_namespace()
-    console.print("[dim]Internet namespace torn down.[/dim]")
+        if firewall.teardown_internet_namespace():
+            console.print("[dim]Internet namespace torn down.[/dim]")
 
 
 # ── subnet management ──────────────────────────────────────────────────────────
