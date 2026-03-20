@@ -138,10 +138,11 @@ def is_blocking() -> bool:
 def get_rules_text() -> str:
     parts = []
     for label, cmd in (
-        ("iptables OUTPUT",   ["iptables",  "-L", "OUTPUT",  "-n", "--line-numbers"]),
-        ("ip6tables OUTPUT",  ["ip6tables", "-L", "OUTPUT",  "-n", "--line-numbers"]),
-        ("iptables FORWARD",  ["iptables",  "-L", "FORWARD", "-n", "--line-numbers"]),
-        ("ip6tables FORWARD", ["ip6tables", "-L", "FORWARD", "-n", "--line-numbers"]),
+        ("iptables OUTPUT",          ["iptables",  "-L", "OUTPUT",      "-n", "-v", "--line-numbers"]),
+        ("ip6tables OUTPUT",         ["ip6tables", "-L", "OUTPUT",      "-n", "-v", "--line-numbers"]),
+        ("iptables FORWARD",         ["iptables",  "-L", "FORWARD",     "-n", "-v", "--line-numbers"]),
+        ("ip6tables FORWARD",        ["ip6tables", "-L", "FORWARD",     "-n", "-v", "--line-numbers"]),
+        ("iptables nat POSTROUTING", ["iptables",  "-t", "nat", "-L", "POSTROUTING", "-n", "-v", "--line-numbers"]),
     ):
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -461,7 +462,7 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
     _ns(netns_name, "ip", "link", "set", "lo", "up")
     _ns(netns_name, "ip", "route", "add", "default", "via", host_ip)
 
-    # enable IP forwarding
+    # enable IP forwarding on the host so it can route namespace traffic to WAN
     Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n")
 
     # NAT: masquerade traffic leaving the namespace

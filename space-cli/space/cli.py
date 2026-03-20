@@ -205,6 +205,7 @@ def off():
 @main.command()
 def status():
     """Show current firewall status and configuration."""
+    ensure_root()
     config = load_config()
     initialized = config.get("initialized", False)
     blocking = firewall.is_blocking()
