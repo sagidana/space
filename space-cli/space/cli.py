@@ -314,6 +314,8 @@ def shell(dns, shell_bin, command):
         console.print(
             f"[dim]  Docker: use [bold]--network {config['docker_network_name']}[/bold] "
             f"to give a container internet access[/dim]\n"
+            f"[dim]  DNS:    add [bold]--dns {dns}[/bold] if container DNS resolution fails "
+            f"(bypasses Docker proxy, which is blocked by the firewall)[/dim]\n"
         )
         proc = firewall.run_internet_shell(username, shell=shell_bin)
         session_id = firewall.register_session(proc.pid, [shell_bin])

@@ -399,6 +399,12 @@ def _setup_docker_network(cfg: dict) -> None:
                  "-i", bridge_name, "-o", wan, "-j", "ACCEPT"],
                 capture_output=True,
             )
+        # Allow return traffic (internet → container) — mirrors the -o veth-space rule for the namespace
+        subprocess.run(
+            ["iptables", "-A", "FORWARD",
+             "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+            capture_output=True,
+        )
     except Exception:
         pass
 
@@ -416,6 +422,11 @@ def _teardown_docker_network(cfg: dict) -> None:
              "-i", bridge_name, "-o", wan, "-j", "ACCEPT"],
             capture_output=True,
         )
+    subprocess.run(
+        ["iptables", "-D", "FORWARD",
+         "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+        capture_output=True,
+    )
     subprocess.run(
         ["docker", "network", "rm", network_name],
         capture_output=True,
