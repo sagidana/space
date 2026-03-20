@@ -50,32 +50,108 @@ def _ip6t(*args):
     subprocess.run(["ip6tables", *args], check=True)
 
 
+# ── rule comment tags ──────────────────────────────────────────────────────────
+
+_TAG_OUT_LO          = "space:output-lo"
+_TAG_OUT_SUBNET      = "space:output-subnet"    # prefix; full tag is f"space:output-subnet-{subnet}"
+_TAG_OUT_LINKLOCAL   = "space:output-linklocal"
+_TAG_OUT_ESTABLISHED = "space:output-established"
+_TAG_OUT_GID         = "space:output-gid"
+_TAG_OUT_DROP        = "space:output-drop"
+_TAG_FWD_WAN_DROP    = "space:forward-wan-drop"
+_TAG_FWD_VETH_IN     = "space:forward-veth-in"
+_TAG_FWD_VETH_OUT    = "space:forward-veth-out"
+_TAG_NAT_MASQ        = "space:nat-masquerade"
+_TAG_FWD_DOCKER_OUT  = "space:forward-docker-out"
+_TAG_FWD_DOCKER_RET  = "space:forward-docker-return"
+
+
+def _rule_exists(table: str, chain: str, comment_tag: str, ipv6: bool = False) -> bool:
+    cmd = ["ip6tables" if ipv6 else "iptables", "-t", table, "-S", chain]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        needle = f'--comment "{comment_tag}"'
+        return any(needle in line for line in result.stdout.splitlines())
+    except Exception:
+        return False
+
+
+def _assert_rule_absent(table: str, chain: str, comment_tag: str, ipv6: bool = False, context: str = "") -> None:
+    if _rule_exists(table, chain, comment_tag, ipv6=ipv6):
+        where = f" (in {context})" if context else ""
+        raise RuntimeError(
+            f"rule '{comment_tag}' already exists in {table}/{chain}{where}. "
+            "This means firewall rules were not cleaned up from a previous run. "
+            "Run `sudo space panic` to recover."
+        )
+
+
+def _assert_rule_present(table: str, chain: str, comment_tag: str, ipv6: bool = False, context: str = "", warn_only: bool = False) -> bool:
+    import sys
+    if not _rule_exists(table, chain, comment_tag, ipv6=ipv6):
+        msg = f"WARNING: expected rule '{comment_tag}' not found in {table}/{chain}"
+        if context:
+            msg += f" (in {context})"
+        if warn_only:
+            print(msg, file=sys.stderr)
+            return False
+        raise RuntimeError(msg)
+    return True
+
+
+def _chain_has_space_rules(chain: str, ipv6: bool = False) -> bool:
+    cmd = ["ip6tables" if ipv6 else "iptables", "-t", "filter", "-S", chain]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return any("space:" in line for line in result.stdout.splitlines())
+    except Exception:
+        return False
+
+
 def apply_rules(subnets: list[str], group: str) -> None:
     """Block all outbound internet traffic; allow loopback, LAN, and the internet group."""
+    import sys
+
     # ── IPv4 ──────────────────────────────────────────────────────────────────
     _ipt("-F", "OUTPUT")
     _ipt("-P", "OUTPUT", "ACCEPT")          # reset policy first
 
-    _ipt("-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT")
+    if _chain_has_space_rules("OUTPUT"):
+        print("WARNING: space rules remain in OUTPUT after flush (kernel issue)", file=sys.stderr)
+
+    _ipt("-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_OUT_LO)
 
     for subnet in subnets:
-        _ipt("-A", "OUTPUT", "-d", subnet, "-j", "ACCEPT")
+        _ipt("-A", "OUTPUT", "-d", subnet, "-j", "ACCEPT",
+             "-m", "comment", "--comment", f"space:output-subnet-{subnet}")
 
-    _ipt("-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT")
-    _ipt("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT")
-    _ipt("-A", "OUTPUT", "-j", "DROP")
+    _ipt("-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_OUT_ESTABLISHED)
+    _ipt("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_OUT_GID)
+    _ipt("-A", "OUTPUT", "-j", "DROP",
+         "-m", "comment", "--comment", _TAG_OUT_DROP)
 
     # ── IPv6 ──────────────────────────────────────────────────────────────────
     _ip6t("-F", "OUTPUT")
     _ip6t("-P", "OUTPUT", "ACCEPT")         # reset policy first
 
-    _ip6t("-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT")
-    # Allow link-local (needed for neighbour discovery / ICMPv6)
-    _ip6t("-A", "OUTPUT", "-d", "fe80::/10", "-j", "ACCEPT")
+    if _chain_has_space_rules("OUTPUT", ipv6=True):
+        print("WARNING: space rules remain in ip6tables OUTPUT after flush (kernel issue)", file=sys.stderr)
 
-    _ip6t("-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT")
-    _ip6t("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT")
-    _ip6t("-A", "OUTPUT", "-j", "DROP")
+    _ip6t("-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT",
+          "-m", "comment", "--comment", _TAG_OUT_LO)
+    # Allow link-local (needed for neighbour discovery / ICMPv6)
+    _ip6t("-A", "OUTPUT", "-d", "fe80::/10", "-j", "ACCEPT",
+          "-m", "comment", "--comment", _TAG_OUT_LINKLOCAL)
+
+    _ip6t("-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT",
+          "-m", "comment", "--comment", _TAG_OUT_ESTABLISHED)
+    _ip6t("-A", "OUTPUT", "-m", "owner", "--gid-owner", group, "-j", "ACCEPT",
+          "-m", "comment", "--comment", _TAG_OUT_GID)
+    _ip6t("-A", "OUTPUT", "-j", "DROP",
+          "-m", "comment", "--comment", _TAG_OUT_DROP)
 
     # ── FORWARD (containers / VMs routed through the host) ────────────────────
     # Insert at position 1 so our DROP precedes any ACCEPT rules added by Docker
@@ -83,8 +159,12 @@ def apply_rules(subnets: list[str], group: str) -> None:
     # we block all forwarded internet traffic regardless of source subnet.
     wan = get_wan_interface()
     if wan:
-        _ipt("-I", "FORWARD", "1", "-o", wan, "-j", "DROP")
-        _ip6t("-I", "FORWARD", "1", "-o", wan, "-j", "DROP")
+        _assert_rule_absent("filter", "FORWARD", _TAG_FWD_WAN_DROP)
+        _assert_rule_absent("filter", "FORWARD", _TAG_FWD_WAN_DROP, ipv6=True)
+        _ipt("-I", "FORWARD", "1", "-o", wan, "-j", "DROP",
+             "-m", "comment", "--comment", _TAG_FWD_WAN_DROP)
+        _ip6t("-I", "FORWARD", "1", "-o", wan, "-j", "DROP",
+              "-m", "comment", "--comment", _TAG_FWD_WAN_DROP)
 
 
 def remove_rules() -> None:
@@ -94,23 +174,25 @@ def remove_rules() -> None:
     _ip6t("-F", "OUTPUT")
     _ip6t("-P", "OUTPUT", "ACCEPT")
 
-    # Remove all copies of the FORWARD DROP rule inserted by apply_rules. Use
-    # -D (delete by spec) rather than flushing the whole chain — Docker and
-    # other tools may have legitimate rules in FORWARD that we must not
-    # disturb. Loop because apply_rules may have been called multiple times
-    # (e.g. init + on), inserting duplicate rules that a single -D won't clear.
+    # Remove the FORWARD DROP rule inserted by apply_rules. Use -D (delete by
+    # spec) rather than flushing the whole chain — Docker and other tools may
+    # have legitimate rules in FORWARD that we must not disturb.
     wan = get_wan_interface()
     if wan:
-        while subprocess.run(
-            ["iptables", "-D", "FORWARD", "-o", wan, "-j", "DROP"],
+        _assert_rule_present("filter", "FORWARD", _TAG_FWD_WAN_DROP, warn_only=True,
+                             context="remove_rules")
+        subprocess.run(
+            ["iptables", "-D", "FORWARD", "-o", wan, "-j", "DROP",
+             "-m", "comment", "--comment", _TAG_FWD_WAN_DROP],
             capture_output=True,
-        ).returncode == 0:
-            pass
-        while subprocess.run(
-            ["ip6tables", "-D", "FORWARD", "-o", wan, "-j", "DROP"],
+        )
+        _assert_rule_present("filter", "FORWARD", _TAG_FWD_WAN_DROP, ipv6=True,
+                             warn_only=True, context="remove_rules")
+        subprocess.run(
+            ["ip6tables", "-D", "FORWARD", "-o", wan, "-j", "DROP",
+             "-m", "comment", "--comment", _TAG_FWD_WAN_DROP],
             capture_output=True,
-        ).returncode == 0:
-            pass
+        )
 
 
 def save_rules() -> None:
@@ -391,22 +473,27 @@ def _setup_docker_network(cfg: dict) -> None:
                 "--opt", f"com.docker.network.bridge.name={bridge_name}",
                 network_name,
             ], check=True, capture_output=True)
-        # Insert ACCEPT for this bridge before the WAN DROP (position 2, after veth ACCEPT)
-        wan = get_wan_interface()
-        if wan:
-            subprocess.run(
-                ["iptables", "-I", "FORWARD", "2",
-                 "-i", bridge_name, "-o", wan, "-j", "ACCEPT"],
-                capture_output=True,
-            )
-        # Allow return traffic (internet → container) — mirrors the -o veth-space rule for the namespace
-        subprocess.run(
-            ["iptables", "-A", "FORWARD",
-             "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
-            capture_output=True,
-        )
     except Exception:
         pass
+
+    # Insert ACCEPT for this bridge before the WAN DROP (position 2, after veth ACCEPT)
+    wan = get_wan_interface()
+    if wan:
+        _assert_rule_absent("filter", "FORWARD", _TAG_FWD_DOCKER_OUT)
+        subprocess.run(
+            ["iptables", "-I", "FORWARD", "2",
+             "-i", bridge_name, "-o", wan, "-j", "ACCEPT",
+             "-m", "comment", "--comment", _TAG_FWD_DOCKER_OUT],
+            check=True, capture_output=True,
+        )
+    # Allow return traffic (internet → container) — mirrors the -o veth-space rule for the namespace
+    _assert_rule_absent("filter", "FORWARD", _TAG_FWD_DOCKER_RET)
+    subprocess.run(
+        ["iptables", "-A", "FORWARD",
+         "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_FWD_DOCKER_RET],
+        check=True, capture_output=True,
+    )
 
 
 def _teardown_docker_network(cfg: dict) -> None:
@@ -417,14 +504,20 @@ def _teardown_docker_network(cfg: dict) -> None:
     bridge_name  = cfg["docker_bridge_name"]
     wan = get_wan_interface()
     if wan:
+        _assert_rule_present("filter", "FORWARD", _TAG_FWD_DOCKER_OUT, warn_only=True,
+                             context="_teardown_docker_network")
         subprocess.run(
             ["iptables", "-D", "FORWARD",
-             "-i", bridge_name, "-o", wan, "-j", "ACCEPT"],
+             "-i", bridge_name, "-o", wan, "-j", "ACCEPT",
+             "-m", "comment", "--comment", _TAG_FWD_DOCKER_OUT],
             capture_output=True,
         )
+    _assert_rule_present("filter", "FORWARD", _TAG_FWD_DOCKER_RET, warn_only=True,
+                         context="_teardown_docker_network")
     subprocess.run(
         ["iptables", "-D", "FORWARD",
-         "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"],
+         "-o", bridge_name, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_FWD_DOCKER_RET],
         capture_output=True,
     )
     subprocess.run(
@@ -454,6 +547,10 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
             _set_refcount(refs_file, _get_refcount(refs_file) + 1)
             return
 
+    _assert_rule_absent("nat",    "POSTROUTING", _TAG_NAT_MASQ,     context="setup_internet_namespace")
+    _assert_rule_absent("filter", "FORWARD",     _TAG_FWD_VETH_IN,  context="setup_internet_namespace")
+    _assert_rule_absent("filter", "FORWARD",     _TAG_FWD_VETH_OUT, context="setup_internet_namespace")
+
     subprocess.run(["ip", "netns", "add", netns_name], check=True)
 
     # veth pair: one end in host, one in namespace
@@ -478,12 +575,21 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
 
     # NAT: masquerade traffic leaving the namespace
     subprocess.run(
-        ["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", ns_subnet, "-j", "MASQUERADE"],
+        ["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", ns_subnet, "-j", "MASQUERADE",
+         "-m", "comment", "--comment", _TAG_NAT_MASQ],
         check=True,
     )
     # Insert at position 1 so this ACCEPT precedes any DROP rule added by apply_rules().
-    subprocess.run(["iptables", "-I", "FORWARD", "1", "-i", veth_host, "-j", "ACCEPT"], check=True)
-    subprocess.run(["iptables", "-A", "FORWARD", "-o", veth_host, "-j", "ACCEPT"], check=True)
+    subprocess.run(
+        ["iptables", "-I", "FORWARD", "1", "-i", veth_host, "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_FWD_VETH_IN],
+        check=True,
+    )
+    subprocess.run(
+        ["iptables", "-A", "FORWARD", "-o", veth_host, "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_FWD_VETH_OUT],
+        check=True,
+    )
 
     # DNS for the namespace
     netns_etc = Path(f"/etc/netns/{netns_name}")
@@ -516,17 +622,26 @@ def teardown_internet_namespace() -> bool:
             return False
         _set_refcount(refs_file, 0)
 
-    # remove NAT rules (ignore errors — may not exist)
+    # remove NAT rules (warn if absent — teardown must complete regardless)
+    _assert_rule_present("nat", "POSTROUTING", _TAG_NAT_MASQ, warn_only=True,
+                         context="teardown_internet_namespace")
     subprocess.run(
-        ["iptables", "-t", "nat", "-D", "POSTROUTING", "-s", ns_subnet, "-j", "MASQUERADE"],
+        ["iptables", "-t", "nat", "-D", "POSTROUTING", "-s", ns_subnet, "-j", "MASQUERADE",
+         "-m", "comment", "--comment", _TAG_NAT_MASQ],
         capture_output=True,
     )
+    _assert_rule_present("filter", "FORWARD", _TAG_FWD_VETH_IN, warn_only=True,
+                         context="teardown_internet_namespace")
     subprocess.run(
-        ["iptables", "-D", "FORWARD", "-i", veth_host, "-j", "ACCEPT"],
+        ["iptables", "-D", "FORWARD", "-i", veth_host, "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_FWD_VETH_IN],
         capture_output=True,
     )
+    _assert_rule_present("filter", "FORWARD", _TAG_FWD_VETH_OUT, warn_only=True,
+                         context="teardown_internet_namespace")
     subprocess.run(
-        ["iptables", "-D", "FORWARD", "-o", veth_host, "-j", "ACCEPT"],
+        ["iptables", "-D", "FORWARD", "-o", veth_host, "-j", "ACCEPT",
+         "-m", "comment", "--comment", _TAG_FWD_VETH_OUT],
         capture_output=True,
     )
 
