@@ -323,6 +323,11 @@ _HOST_IP   = "10.200.200.1"
 _NS_IP     = "10.200.200.2"
 _NS_SUBNET = "10.200.200.0/24"
 
+DOCKER_NETWORK_NAME    = "space-inet-net"
+_DOCKER_BRIDGE_NAME    = "br-space-inet"
+_DOCKER_NETWORK_SUBNET = "10.200.201.0/24"
+_DOCKER_NETWORK_GW     = "10.200.201.1"
+
 _REFCOUNT_FILE = Path("/run/space-inet.refs")
 _REFCOUNT_LOCK = "/run/space-inet.lock"
 
@@ -365,6 +370,61 @@ def _set_refcount(n: int) -> None:
         _REFCOUNT_FILE.unlink(missing_ok=True)
     else:
         _REFCOUNT_FILE.write_text(str(n))
+
+
+def _docker_available() -> bool:
+    return subprocess.run(["which", "docker"], capture_output=True).returncode == 0
+
+
+def _setup_docker_network() -> None:
+    """Create the space-inet Docker network and add a precise FORWARD ACCEPT rule for it.
+
+    Uses a fixed bridge name (br-space-inet) so the iptables rule is deterministic.
+    No-ops if Docker is not installed.
+    """
+    if not _docker_available():
+        return
+    try:
+        exists = subprocess.run(
+            ["docker", "network", "inspect", DOCKER_NETWORK_NAME],
+            capture_output=True,
+        ).returncode == 0
+        if not exists:
+            subprocess.run([
+                "docker", "network", "create",
+                "--driver", "bridge",
+                "--subnet", _DOCKER_NETWORK_SUBNET,
+                "--gateway", _DOCKER_NETWORK_GW,
+                "--opt", f"com.docker.network.bridge.name={_DOCKER_BRIDGE_NAME}",
+                DOCKER_NETWORK_NAME,
+            ], check=True, capture_output=True)
+        # Insert ACCEPT for this bridge before the WAN DROP (position 2, after veth-space ACCEPT)
+        wan = get_wan_interface()
+        if wan:
+            subprocess.run(
+                ["iptables", "-I", "FORWARD", "2",
+                 "-i", _DOCKER_BRIDGE_NAME, "-o", wan, "-j", "ACCEPT"],
+                capture_output=True,
+            )
+    except Exception:
+        pass
+
+
+def _teardown_docker_network() -> None:
+    """Remove the space-inet Docker network and its FORWARD rule."""
+    if not _docker_available():
+        return
+    wan = get_wan_interface()
+    if wan:
+        subprocess.run(
+            ["iptables", "-D", "FORWARD",
+             "-i", _DOCKER_BRIDGE_NAME, "-o", wan, "-j", "ACCEPT"],
+            capture_output=True,
+        )
+    subprocess.run(
+        ["docker", "network", "rm", DOCKER_NETWORK_NAME],
+        capture_output=True,
+    )
 
 
 def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
@@ -414,6 +474,8 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
     netns_etc.mkdir(parents=True, exist_ok=True)
     (netns_etc / "resolv.conf").write_text(f"nameserver {dns}\n")
 
+    _setup_docker_network()
+
     with _RefLock():
         _set_refcount(1)
 
@@ -456,6 +518,8 @@ def teardown_internet_namespace() -> None:
         for f in netns_etc.iterdir():
             f.unlink()
         netns_etc.rmdir()
+
+    _teardown_docker_network()
 
     return True
 

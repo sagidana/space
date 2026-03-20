@@ -309,7 +309,11 @@ def shell(dns, shell_bin, command):
             f"[dim]  space kill {session_id:<3}         — stop this session[/dim]"
         )
     else:
-        console.print(f"[green]Entering internet shell[/green] [dim](exit to return)[/dim]\n")
+        console.print(f"[green]Entering internet shell[/green] [dim](exit to return)[/dim]")
+        console.print(
+            f"[dim]  Docker: use [bold]--network {firewall.DOCKER_NETWORK_NAME}[/bold] "
+            f"to give a container internet access[/dim]\n"
+        )
         proc = firewall.run_internet_shell(username, shell=shell_bin)
         session_id = firewall.register_session(proc.pid, [shell_bin])
         try:
