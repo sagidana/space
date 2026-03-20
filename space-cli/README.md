@@ -196,6 +196,5 @@ sudo groupdel internet        # optional: remove the group
 ## Notes
 
 - **DNS**: `space init` auto-detects your system DNS and saves it to config. It handles `systemd-resolved` transparently — if `/etc/resolv.conf` points to `127.0.0.53`, the real upstream server is read from `/run/systemd/resolve/resolv.conf`. The saved DNS is used by `space shell`; override it per-session with `--dns`.
-- **sudo + internet**: `sudo` drops group membership by default. Use `sudo sg internet -c "apt update"` or configure `sudo` to preserve groups.
 - **IPv6**: Both IPv4 (`iptables`) and IPv6 (`ip6tables`) are managed. Link-local addresses (`fe80::/10`) are always allowed for neighbour discovery / ICMPv6.
 - **Config location**: `~/.config/space/config.json` (always stored as the real user, even when run via sudo).
