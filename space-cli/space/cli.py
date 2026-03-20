@@ -48,7 +48,15 @@ def need_init(config):
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
-@click.group()
+class _DefaultRunGroup(click.Group):
+    """Treat unknown subcommands as arguments to `run`."""
+    def parse_args(self, ctx, args):
+        if args and not args[0].startswith("-") and args[0] not in self.commands:
+            args = ["run"] + list(args)
+        return super().parse_args(ctx, args)
+
+
+@click.group(cls=_DefaultRunGroup)
 def main():
     """space — make internet access explicit, not implicit."""
 
