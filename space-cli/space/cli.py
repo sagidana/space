@@ -1,5 +1,5 @@
 import os
-import pwd
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -21,16 +21,19 @@ console = Console()
 def require_root():
     if os.geteuid() != 0:
         console.print("[red]This command requires root. Run with sudo.[/red]")
-        # Detect the common case: installed as a regular user instead of system-wide
-        import shutil
-        space_path = shutil.which("space") or ""
-        if "/.local/" in space_path:
-            console.print(
-                "[yellow]Hint:[/yellow] space is installed in your user directory "
-                f"({space_path}), so [bold]sudo space[/bold] won't find it.\n"
-                "Reinstall system-wide:\n\n"
-                "  [bold]sudo pip install <path-to-space-cli>[/bold]\n"
-            )
+        sys.exit(1)
+
+
+def ensure_root():
+    """Re-execute the current command under sudo if not already root."""
+    if os.geteuid() == 0:
+        return
+    console.print("[yellow]Root privileges required. Re-running with sudo...[/yellow]")
+    argv0 = shutil.which(sys.argv[0]) or sys.argv[0]
+    try:
+        os.execvp("sudo", ["sudo", argv0] + sys.argv[1:])
+    except Exception as e:
+        console.print(f"[red]Failed to escalate to root:[/red] {e}")
         sys.exit(1)
 
 
@@ -41,70 +44,6 @@ def need_init(config):
         )
         sys.exit(1)
 
-
-_ALIAS_MARKER = "# added by space"
-
-
-def _shell_rc_file(username: str) -> Path | None:
-    """Return the rc file for the user's login shell, or None if unsupported."""
-    try:
-        entry = pwd.getpwnam(username)
-        home = Path(entry.pw_dir)
-        shell = Path(entry.pw_shell).name
-    except KeyError:
-        return None
-    if shell in ("bash",):
-        return home / ".bashrc"
-    if shell in ("zsh",):
-        return home / ".zshrc"
-    return None
-
-
-def install_shell_alias(username: str, space_bin: Path) -> tuple[bool, str]:
-    """Append `alias space='sudo <space_bin>'` to the user's shell rc file."""
-    rc = _shell_rc_file(username)
-    alias_line = f'alias space=\'sudo -E PATH="$PATH" {space_bin}\''
-    if rc is None:
-        shell = Path(pwd.getpwnam(username).pw_shell).name
-        return False, (
-            f"Unsupported shell '{shell}' — add manually: "
-            + alias_line
-        )
-
-    if rc.exists() and (_ALIAS_MARKER in rc.read_text() or alias_line in rc.read_text()):
-        return True, f"Alias already present in {rc}"
-
-    with rc.open("a") as f:
-        f.write(f"\n{_ALIAS_MARKER}\n{alias_line}\n")
-    return True, f"Added alias to {rc}"
-
-
-def remove_shell_alias(username: str) -> bool:
-    """Remove the alias block previously written by install_shell_alias."""
-    try:
-        rc = _shell_rc_file(username)
-    except Exception:
-        return False
-    if rc is None or not rc.exists():
-        return False
-
-    lines = rc.read_text().splitlines(keepends=True)
-    filtered = []
-    skip_next = False
-    for line in lines:
-        if line.strip() == _ALIAS_MARKER:
-            skip_next = True
-            # also drop the preceding blank line we added
-            if filtered and filtered[-1].strip() == "":
-                filtered.pop()
-            continue
-        if skip_next and line.startswith("alias space="):
-            skip_next = False
-            continue
-        filtered.append(line)
-
-    rc.write_text("".join(filtered))
-    return True
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -119,7 +58,7 @@ def main():
 @main.command()
 def init():
     """First-time setup: detect subnet, create group, apply firewall rules."""
-    require_root()
+    ensure_root()
     config = load_config()
 
     console.print("\n[bold cyan]space — internet isolation setup[/bold cyan]\n")
@@ -154,10 +93,12 @@ def init():
     # ── confirm ───────────────────────────────────────────────────────────────
     console.print()
     console.print("[bold]Summary[/bold]")
+    real_bin = Path(shutil.which(sys.argv[0]) or sys.argv[0]).resolve()
     console.print(f"  LAN subnets  : {', '.join(subnets)}")
     console.print(f"  Group        : {group}")
     console.print(f"  Add user     : {username or '(unknown)'}")
     console.print(f"  Wrapper      : /usr/local/bin/inet")
+    console.print(f"  Symlink      : /usr/bin/space → {real_bin}")
     console.print()
 
     if not Confirm.ask("Apply?", default=True):
@@ -191,14 +132,15 @@ def init():
     save_config(config)
     console.print("[green]✓[/green] Saved config to ~/.config/space/config.json")
 
-    # Install shell alias so the user can type `space` instead of `sudo space`
-    space_bin = Path(sys.executable).parent / "space"
-    if username and space_bin.exists():
-        ok, msg = install_shell_alias(username, space_bin)
-        if ok:
-            console.print(f"[green]✓[/green] {msg}")
-        else:
-            console.print(f"[yellow]![/yellow] Shell alias skipped: {msg}")
+    # ── symlink to /usr/bin for system-wide sudo access ──────────────────────
+    symlink = Path("/usr/bin/space")
+    try:
+        if symlink.is_symlink() or symlink.exists():
+            symlink.unlink()
+        symlink.symlink_to(real_bin)
+        console.print(f"[green]✓[/green] Symlinked [bold]{symlink}[/bold] → [bold]{real_bin}[/bold]")
+    except Exception as e:
+        console.print(f"[yellow]![/yellow] Could not create /usr/bin/space symlink: {e}")
 
     console.print()
     console.print("[bold green]Done![/bold green]")
@@ -430,10 +372,10 @@ def uninstall():
     firewall.remove_wrapper()
     console.print("[green]✓ Removed /usr/local/bin/inet.[/green]")
 
-    config = load_config()
-    username = config.get("username") or os.environ.get("SUDO_USER") or os.environ.get("USER")
-    if username and remove_shell_alias(username):
-        console.print("[green]✓ Removed shell alias.[/green]")
+    symlink = Path("/usr/bin/space")
+    if symlink.is_symlink():
+        symlink.unlink()
+        console.print("[green]✓ Removed /usr/bin/space symlink.[/green]")
 
     console.print("[dim]Config preserved at ~/.config/space/config.json[/dim]")
     console.print("[dim]Group 'internet' preserved (remove manually with: sudo groupdel internet)[/dim]")

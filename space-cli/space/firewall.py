@@ -109,7 +109,17 @@ def run_with_internet(command: list[str], group: str) -> None:
     user's real primary group.
     """
     internet_gid = grp.getgrnam(group).gr_gid
-    os.setegid(internet_gid)
+    try:
+        os.setegid(internet_gid)
+    except PermissionError:
+        import sys
+        from rich.console import Console
+        Console().print(
+            f"\n[red]Permission denied:[/red] cannot switch to group '[bold]{group}[/bold]'.\n\n"
+            f"Run the command with sudo:\n\n"
+            f"  [bold]sudo space run {' '.join(command)}[/bold]"
+        )
+        sys.exit(1)
     os.execvp(command[0], command)
 
 
