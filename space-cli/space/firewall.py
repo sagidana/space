@@ -1,7 +1,10 @@
+import datetime
 import fcntl
 import grp
+import json
 import os
 import pwd
+import signal
 import subprocess
 from pathlib import Path
 
@@ -420,18 +423,108 @@ _PRESERVED_ENV_VARS = [
 ]
 
 
-def run_internet_shell(username: str, shell: str = "/bin/bash") -> int:
+# ── session registry ──────────────────────────────────────────────────────────
+
+_SESSIONS_DIR = Path("/run/space-sessions")
+
+
+def _is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+
+
+def register_session(pid: int, command: list) -> int:
+    """Record a background session. Returns the assigned session ID."""
+    _SESSIONS_DIR.mkdir(exist_ok=True)
+    existing_ids = []
+    for f in _SESSIONS_DIR.glob("*.json"):
+        try:
+            existing_ids.append(int(f.stem))
+        except ValueError:
+            pass
+    session_id = max(existing_ids, default=0) + 1
+    (_SESSIONS_DIR / f"{session_id}.json").write_text(json.dumps({
+        "id": session_id,
+        "pid": pid,
+        "command": command,
+        "started": datetime.datetime.now().isoformat(timespec="seconds"),
+    }))
+    return session_id
+
+
+def unregister_session(session_id: int) -> None:
+    (_SESSIONS_DIR / f"{session_id}.json").unlink(missing_ok=True)
+
+
+def list_sessions() -> list:
+    """Return active sessions, pruning dead ones (and decrementing refcount for each)."""
+    if not _SESSIONS_DIR.exists():
+        return []
+    sessions = []
+    for f in sorted(_SESSIONS_DIR.glob("*.json"),
+                    key=lambda p: int(p.stem) if p.stem.isdigit() else 0):
+        try:
+            data = json.loads(f.read_text())
+        except Exception:
+            f.unlink(missing_ok=True)
+            continue
+        if _is_alive(data["pid"]):
+            sessions.append(data)
+        else:
+            f.unlink(missing_ok=True)
+            teardown_internet_namespace()  # decrement refcount for the dead session
+    return sessions
+
+
+def kill_session(session_id: int) -> tuple:
+    """Kill a session by ID. Returns (success, message)."""
+    f = _SESSIONS_DIR / f"{session_id}.json"
+    if not f.exists():
+        return False, f"Session {session_id} not found"
+    try:
+        data = json.loads(f.read_text())
+        pid = data["pid"]
+        if _is_alive(pid):
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        f.unlink(missing_ok=True)
+        teardown_internet_namespace()
+        return True, f"Killed session {session_id} ({' '.join(data['command'])}, pid {pid})"
+    except Exception as e:
+        return False, str(e)
+
+
+def run_internet_command_background(username: str, command: list) -> int:
+    """Run command inside the internet namespace as username in the background.
+    Returns the PID of the launched process group leader.
+    """
+    preserve = ",".join(_PRESERVED_ENV_VARS)
+    proc = subprocess.Popen(
+        ["ip", "netns", "exec", NETNS_NAME,
+         "sudo", "-u", username, f"--preserve-env={preserve}", "--", *command],
+        start_new_session=True,
+    )
+    return proc.pid
+
+
+def run_internet_shell(username: str, shell: str = "/bin/bash") -> subprocess.Popen:
     """
     Enter the internet namespace and launch an interactive shell as username.
     Must be called as root (ip netns exec requires it).
     The shell itself runs as the real user — sudo inside still works because
     child processes inherit the namespace regardless of UID/GID changes.
     Display-related env vars are preserved so GUI apps (Chrome, etc.) work.
-    Returns the shell's exit code.
+    Returns the Popen object (caller should call .wait()).
     """
     preserve = ",".join(_PRESERVED_ENV_VARS)
-    result = subprocess.run(
+    return subprocess.Popen(
         ["ip", "netns", "exec", NETNS_NAME,
          "sudo", "-u", username, f"--preserve-env={preserve}", "--", shell],
     )
-    return result.returncode

@@ -251,15 +251,25 @@ def run(command):
 
 # ── internet shell ─────────────────────────────────────────────────────────────
 
-@main.command()
+@main.command(
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True}
+)
 @click.option("--dns", default="8.8.8.8", show_default=True, help="DNS server to use inside the shell.")
 @click.option("--shell", "shell_bin", default="/bin/bash", show_default=True, help="Shell binary to launch.")
-def shell(dns, shell_bin):
-    """Launch a shell with full internet access.
+@click.argument("command", nargs=-1)
+def shell(dns, shell_bin, command):
+    """Launch an internet shell, or run a command in the internet namespace.
 
     \b
-    All commands inside — including sudo — have internet access.
-    The namespace is torn down automatically when you exit the shell.
+    Without arguments: opens an interactive shell with full internet access.
+    With arguments: runs the command in the background inside the namespace.
+      The namespace stays alive until the process exits or you kill the session.
+
+    \b
+    Examples:
+      space shell                   # interactive shell
+      space shell firefox           # launch firefox with internet access
+      space shell git push          # run git push with internet access
     """
     ensure_root()
     config = load_config()
@@ -277,12 +287,90 @@ def shell(dns, shell_bin):
         console.print(f"[red]Failed to set up namespace:[/red] {e}")
         sys.exit(1)
 
-    console.print(f"[green]Entering internet shell[/green] [dim](exit to return)[/dim]\n")
-    try:
-        firewall.run_internet_shell(username, shell=shell_bin)
-    finally:
-        if firewall.teardown_internet_namespace():
-            console.print("[dim]Internet namespace torn down.[/dim]")
+    if command:
+        cmd_list = list(command)
+        pid = firewall.run_internet_command_background(username, cmd_list)
+        session_id = firewall.register_session(pid, cmd_list)
+        console.print(
+            f"[green]Session {session_id}[/green] started: "
+            f"[bold]{' '.join(cmd_list)}[/bold] [dim](pid {pid})[/dim]"
+        )
+        console.print(
+            f"[dim]  space shells          — list sessions[/dim]\n"
+            f"[dim]  space kill {session_id:<3}         — stop this session[/dim]"
+        )
+    else:
+        console.print(f"[green]Entering internet shell[/green] [dim](exit to return)[/dim]\n")
+        proc = firewall.run_internet_shell(username, shell=shell_bin)
+        session_id = firewall.register_session(proc.pid, [shell_bin])
+        try:
+            proc.wait()
+        finally:
+            firewall.unregister_session(session_id)
+            if firewall.teardown_internet_namespace():
+                console.print("[dim]Internet namespace torn down.[/dim]")
+
+
+# ── session management ─────────────────────────────────────────────────────────
+
+@main.command("shells")
+def shells():
+    """List all active internet namespace sessions."""
+    ensure_root()
+    sessions = firewall.list_sessions()
+    if not sessions:
+        console.print("[dim]No active sessions.[/dim]")
+        return
+
+    table = Table(show_header=True)
+    table.add_column("ID", style="bold", no_wrap=True)
+    table.add_column("PID", style="dim", no_wrap=True)
+    table.add_column("Command")
+    table.add_column("Started", style="dim", no_wrap=True)
+
+    for s in sessions:
+        table.add_row(
+            str(s["id"]),
+            str(s["pid"]),
+            " ".join(s["command"]),
+            s.get("started", "-"),
+        )
+
+    console.print(table)
+
+
+@main.command("kill")
+@click.argument("session_id", type=int)
+def kill_cmd(session_id):
+    """Kill a specific internet namespace session by ID."""
+    ensure_root()
+    success, message = firewall.kill_session(session_id)
+    if success:
+        console.print(f"[green]✓[/green] {message}")
+    else:
+        console.print(f"[red]✗[/red] {message}")
+        sys.exit(1)
+
+
+@main.command("killall")
+def killall():
+    """Kill all active internet namespace sessions."""
+    ensure_root()
+    sessions = firewall.list_sessions()
+    if not sessions:
+        console.print("[dim]No active sessions.[/dim]")
+        return
+
+    killed = 0
+    for s in sessions:
+        success, message = firewall.kill_session(s["id"])
+        if success:
+            console.print(f"[green]✓[/green] {message}")
+            killed += 1
+        else:
+            console.print(f"[yellow]![/yellow] {message}")
+
+    console.print(f"\n[green]Killed {killed} session(s).[/green]")
 
 
 # ── subnet management ──────────────────────────────────────────────────────────
