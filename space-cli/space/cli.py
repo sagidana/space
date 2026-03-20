@@ -18,12 +18,6 @@ console = Console()
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def require_root():
-    if os.geteuid() != 0:
-        console.print("[red]This command requires root. Run with sudo.[/red]")
-        sys.exit(1)
-
-
 def ensure_root():
     """Re-execute the current command under sudo if not already root."""
     if os.geteuid() == 0:
@@ -182,7 +176,7 @@ def init():
 @main.command()
 def on():
     """Enable internet blocking (re-apply firewall rules)."""
-    require_root()
+    ensure_root()
     config = load_config()
     need_init(config)
     firewall.apply_rules(config["subnets"], config["group"])
@@ -192,7 +186,7 @@ def on():
 @main.command()
 def off():
     """Disable internet blocking (flush OUTPUT rules)."""
-    require_root()
+    ensure_root()
     config = load_config()
     need_init(config)
 
@@ -393,7 +387,7 @@ def killall():
 @main.command()
 def subnet():
     """Re-detect or update allowed LAN subnets."""
-    require_root()
+    ensure_root()
     config = load_config()
     need_init(config)
 
@@ -432,7 +426,7 @@ def subnet():
 @main.command()
 def save():
     """Persist current iptables rules across reboots via netfilter-persistent."""
-    require_root()
+    ensure_root()
     try:
         firewall.save_rules()
         console.print("[green]✓ Rules saved.[/green]")
@@ -453,12 +447,8 @@ def panic():
 
     No confirmation prompt — runs immediately.
     """
-    require_root()
-    for ipt in ("iptables", "ip6tables"):
-        subprocess.run([ipt, "-F", "OUTPUT"])
-        subprocess.run([ipt, "-P", "OUTPUT", "ACCEPT"])
-        subprocess.run([ipt, "-F", "FORWARD"])
-        subprocess.run([ipt, "-t", "nat", "-F"])
+    ensure_root()
+    firewall.remove_rules()
     console.print("[green]✓ All rules cleared. Full internet access restored.[/green]")
 
 
@@ -467,7 +457,7 @@ def panic():
 @main.command()
 def uninstall():
     """Remove all space firewall rules and the inet wrapper."""
-    require_root()
+    ensure_root()
 
     if not Confirm.ask(
         "[red]Remove all space firewall rules and the inet wrapper?[/red]",

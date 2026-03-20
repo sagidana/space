@@ -92,13 +92,23 @@ def remove_rules() -> None:
     _ip6t("-F", "OUTPUT")
     _ip6t("-P", "OUTPUT", "ACCEPT")
 
-    # Remove the FORWARD DROP rule inserted by apply_rules. Use -D (delete by
-    # spec) rather than flushing the whole chain — Docker and other tools may
-    # have legitimate rules in FORWARD that we must not disturb.
+    # Remove all copies of the FORWARD DROP rule inserted by apply_rules. Use
+    # -D (delete by spec) rather than flushing the whole chain — Docker and
+    # other tools may have legitimate rules in FORWARD that we must not
+    # disturb. Loop because apply_rules may have been called multiple times
+    # (e.g. init + on), inserting duplicate rules that a single -D won't clear.
     wan = get_wan_interface()
     if wan:
-        subprocess.run(["iptables",  "-D", "FORWARD", "-o", wan, "-j", "DROP"], capture_output=True)
-        subprocess.run(["ip6tables", "-D", "FORWARD", "-o", wan, "-j", "DROP"], capture_output=True)
+        while subprocess.run(
+            ["iptables", "-D", "FORWARD", "-o", wan, "-j", "DROP"],
+            capture_output=True,
+        ).returncode == 0:
+            pass
+        while subprocess.run(
+            ["ip6tables", "-D", "FORWARD", "-o", wan, "-j", "DROP"],
+            capture_output=True,
+        ).returncode == 0:
+            pass
 
 
 def save_rules() -> None:
@@ -395,7 +405,8 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
         ["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", _NS_SUBNET, "-j", "MASQUERADE"],
         check=True,
     )
-    subprocess.run(["iptables", "-A", "FORWARD", "-i", VETH_HOST, "-j", "ACCEPT"], check=True)
+    # Insert at position 1 so this ACCEPT precedes any DROP rule added by apply_rules().
+    subprocess.run(["iptables", "-I", "FORWARD", "1", "-i", VETH_HOST, "-j", "ACCEPT"], check=True)
     subprocess.run(["iptables", "-A", "FORWARD", "-o", VETH_HOST, "-j", "ACCEPT"], check=True)
 
     # DNS for the namespace
