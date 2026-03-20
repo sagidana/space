@@ -109,7 +109,7 @@ def init():
     console.print(f"  DNS          : {dns}")
     console.print(f"  Group        : {group}")
     console.print(f"  Add user     : {username or '(unknown)'}")
-    console.print(f"  Wrapper      : /usr/local/bin/inet")
+    console.print(f"  Wrapper      : {config['wrapper_path']}")
     console.print(f"  Symlink      : /usr/bin/space → {real_bin}")
     console.print()
 
@@ -131,8 +131,8 @@ def init():
     firewall.apply_rules(subnets, group)
     console.print("[green]✓[/green] Applied iptables rules")
 
-    firewall.install_wrapper(group)
-    console.print("[green]✓[/green] Installed [bold]/usr/local/bin/inet[/bold]")
+    firewall.install_wrapper(group, config["wrapper_path"])
+    console.print(f"[green]✓[/green] Installed [bold]{config['wrapper_path']}[/bold]")
 
     config.update({
         "subnets": subnets,
@@ -223,7 +223,7 @@ def status():
     table.add_row("Internet group", config.get("group") or "[dim]-[/dim]")
     table.add_row(
         "inet wrapper",
-        "[green]/usr/local/bin/inet[/green]" if config.get("wrapper_installed") else "[dim]not installed[/dim]",
+        f"[green]{config['wrapper_path']}[/green]" if config.get("wrapper_installed") else "[dim]not installed[/dim]",
     )
 
     console.print()
@@ -311,7 +311,7 @@ def shell(dns, shell_bin, command):
     else:
         console.print(f"[green]Entering internet shell[/green] [dim](exit to return)[/dim]")
         console.print(
-            f"[dim]  Docker: use [bold]--network {firewall.DOCKER_NETWORK_NAME}[/bold] "
+            f"[dim]  Docker: use [bold]--network {config['docker_network_name']}[/bold] "
             f"to give a container internet access[/dim]\n"
         )
         proc = firewall.run_internet_shell(username, shell=shell_bin)
@@ -472,8 +472,9 @@ def uninstall():
     firewall.remove_rules()
     console.print("[green]✓ Firewall rules removed.[/green]")
 
-    firewall.remove_wrapper()
-    console.print("[green]✓ Removed /usr/local/bin/inet.[/green]")
+    config = load_config()
+    firewall.remove_wrapper(config["wrapper_path"])
+    console.print(f"[green]✓ Removed {config['wrapper_path']}.[/green]")
 
     symlink = Path("/usr/bin/space")
     if symlink.is_symlink():
@@ -481,4 +482,4 @@ def uninstall():
         console.print("[green]✓ Removed /usr/bin/space symlink.[/green]")
 
     console.print("[dim]Config preserved at ~/.config/space/config.json[/dim]")
-    console.print("[dim]Group 'internet' preserved (remove manually with: sudo groupdel internet)[/dim]")
+    console.print(f"[dim]Group '{config['group']}' preserved (remove manually with: sudo groupdel {config['group']})[/dim]")
