@@ -323,10 +323,18 @@ def shell(dns, shell_bin, command):
 
     console.print(f"[cyan]Setting up internet namespace...[/cyan]")
     try:
-        firewall.setup_internet_namespace(dns=dns)
+        docker_warning = firewall.setup_internet_namespace(dns=dns)
     except Exception as e:
         console.print(f"[red]Failed to set up namespace:[/red] {e}")
         sys.exit(1)
+
+    if docker_warning:
+        console.print(
+            f"[yellow]Warning: Docker network setup failed:[/yellow] {docker_warning}\n"
+            f"[yellow]  Docker containers will not have internet access from this shell.[/yellow]\n"
+            f"[yellow]  To fix: restart Docker ([bold]sudo systemctl restart docker[/bold]) "
+            f"then re-run [bold]space shell[/bold].[/yellow]"
+        )
 
     if command:
         cmd_list = list(command)
@@ -493,8 +501,20 @@ def panic():
     """
     ensure_root()
     _kill_active_sessions()
-    firewall.panic_flush()
+    removed = firewall.panic_flush()
     console.print("[green]✓ All rules cleared. Full internet access restored.[/green]")
+    console.print(
+        "[yellow]⚠ Docker's iptables chains have been wiped. "
+        "Docker networking will not work until you restart the service:[/yellow]\n"
+        "  [bold]sudo systemctl restart docker[/bold]"
+    )
+    if removed:
+        console.print(
+            "\n[yellow]⚠ The following third-party rules were also removed. "
+            "Services that depend on them may be broken:[/yellow]"
+        )
+        for rule in removed:
+            console.print(f"  [dim]{rule}[/dim]")
 
 
 # ── uninstall ──────────────────────────────────────────────────────────────────

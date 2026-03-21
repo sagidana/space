@@ -196,10 +196,24 @@ def remove_rules() -> None:
         )
 
 
-def panic_flush() -> None:
+def panic_flush() -> list[str]:
     """Nuclear reset: flush every rule in every chain of every table, delete all
     user-defined chains, and reset all built-in chain policies to ACCEPT.
-    After this call every table and every chain is completely empty."""
+    After this call every table and every chain is completely empty.
+
+    Returns a list of non-space rule strings that were present before the flush,
+    so the caller can warn the user about third-party rules that were removed."""
+    # Snapshot all rules before wiping so we can report collateral damage.
+    non_space_rules: list[str] = []
+    for save_cmd, label in (("iptables-save", "iptables"), ("ip6tables-save", "ip6tables")):
+        result = subprocess.run([save_cmd], capture_output=True, text=True)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                stripped = line.strip()
+                # iptables-save emits actual rules as lines starting with -A
+                if stripped.startswith("-A") and "space:" not in stripped:
+                    non_space_rules.append(f"{label}: {stripped}")
+
     tables = ["filter", "nat", "mangle", "raw", "security"]
     builtin_chains = {
         "filter":   ["INPUT", "FORWARD", "OUTPUT"],
@@ -214,6 +228,8 @@ def panic_flush() -> None:
             subprocess.run([cmd, "-t", table, "-X"], capture_output=True)
             for chain in builtin_chains[table]:
                 subprocess.run([cmd, "-t", table, "-P", chain, "ACCEPT"], capture_output=True)
+
+    return non_space_rules
 
 
 def save_rules() -> None:
@@ -473,6 +489,7 @@ def _setup_docker_network(cfg: dict) -> None:
 
     Uses the configured bridge name so the iptables rule is deterministic.
     No-ops if Docker is not installed.
+    Raises RuntimeError if Docker network creation fails.
     """
     if not _docker_available():
         return
@@ -480,22 +497,34 @@ def _setup_docker_network(cfg: dict) -> None:
     bridge_name  = cfg["docker_bridge_name"]
     subnet       = cfg["docker_network_subnet"]
     gateway      = cfg["docker_network_gateway"]
-    try:
-        exists = subprocess.run(
-            ["docker", "network", "inspect", network_name],
-            capture_output=True,
-        ).returncode == 0
-        if not exists:
-            subprocess.run([
-                "docker", "network", "create",
-                "--driver", "bridge",
-                "--subnet", subnet,
-                "--gateway", gateway,
-                "--opt", f"com.docker.network.bridge.name={bridge_name}",
-                network_name,
-            ], check=True, capture_output=True)
-    except Exception:
-        pass
+
+    exists = subprocess.run(
+        ["docker", "network", "inspect", network_name],
+        capture_output=True,
+    ).returncode == 0
+
+    if not exists:
+        # A stale kernel bridge by the same name (left over from a crashed or
+        # force-killed previous session) will cause `docker network create` to
+        # fail.  Delete it first so Docker can recreate it cleanly.
+        if subprocess.run(
+            ["ip", "link", "show", bridge_name], capture_output=True
+        ).returncode == 0:
+            subprocess.run(["ip", "link", "del", bridge_name], capture_output=True)
+
+        result = subprocess.run([
+            "docker", "network", "create",
+            "--driver", "bridge",
+            "--subnet", subnet,
+            "--gateway", gateway,
+            "--opt", f"com.docker.network.bridge.name={bridge_name}",
+            network_name,
+        ], capture_output=True)
+        if result.returncode != 0:
+            err = result.stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                f"docker network create {network_name!r} failed: {err}"
+            )
 
     # Insert ACCEPT for this bridge before the WAN DROP (position 2, after veth ACCEPT)
     wan = get_wan_interface()
@@ -547,11 +576,15 @@ def _teardown_docker_network(cfg: dict) -> None:
     )
 
 
-def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
+def setup_internet_namespace(dns: str = "8.8.8.8") -> str | None:
     """Create a network namespace with full internet access via NAT.
 
     If the namespace already exists (another shell is using it), the ref count
     is incremented and the existing namespace is reused — no recreation.
+
+    Returns None on full success, or a warning string if the namespace was set
+    up but Docker network creation failed (the shell will still work; only
+    Docker containers will lack internet access until the issue is resolved).
     """
     cfg        = load_config()
     netns_name = cfg["netns_name"]
@@ -566,7 +599,7 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
     with _RefLock(lock_path):
         if namespace_exists(netns_name):
             _set_refcount(refs_file, _get_refcount(refs_file) + 1)
-            return
+            return None
 
     _assert_rule_absent("nat",    "POSTROUTING", _TAG_NAT_MASQ,     context="setup_internet_namespace")
     _assert_rule_absent("filter", "FORWARD",     _TAG_FWD_VETH_IN,  context="setup_internet_namespace")
@@ -617,10 +650,16 @@ def setup_internet_namespace(dns: str = "8.8.8.8") -> None:
     netns_etc.mkdir(parents=True, exist_ok=True)
     (netns_etc / "resolv.conf").write_text(f"nameserver {dns}\n")
 
-    _setup_docker_network(cfg)
+    docker_warning: str | None = None
+    try:
+        _setup_docker_network(cfg)
+    except Exception as e:
+        docker_warning = str(e)
 
     with _RefLock(lock_path):
         _set_refcount(refs_file, 1)
+
+    return docker_warning
 
 
 def teardown_internet_namespace() -> bool:
