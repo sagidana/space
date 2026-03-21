@@ -7,6 +7,7 @@ import pwd
 import re
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import load as load_config
@@ -783,6 +784,40 @@ def run_internet_command_background(username: str, command: list) -> int:
     return proc.pid
 
 
+def _make_bash_rcfile(username: str) -> str:
+    """Create a temp --rcfile that sources ~/.bashrc then prefixes PS1 with '(space)'."""
+    pw = pwd.getpwnam(username)
+    fd, path = tempfile.mkstemp(suffix=".sh", prefix="space_rc_")
+    try:
+        os.fchown(fd, pw.pw_uid, pw.pw_gid)
+        content = (
+            f'trap \'rm -f -- "{path}"\' EXIT\n'
+            '[ -f ~/.bashrc ] && . ~/.bashrc\n'
+            'PS1="\\[\\033[01;33m\\](space)\\[\\033[00m\\] $PS1"\n'
+        )
+        os.write(fd, content.encode())
+    finally:
+        os.close(fd)
+    return path
+
+
+def _make_zsh_zdotdir(username: str) -> str:
+    """Create a temp ZDOTDIR that sources ~/.zshrc then prefixes PROMPT with '(space)'."""
+    pw = pwd.getpwnam(username)
+    tmpdir = tempfile.mkdtemp(prefix="space_zdot_")
+    os.chown(tmpdir, pw.pw_uid, pw.pw_gid)
+    zshrc = os.path.join(tmpdir, ".zshrc")
+    with open(zshrc, "w") as f:
+        f.write(
+            f'trap \'rm -f -- "{zshrc}"; rmdir -- "{tmpdir}"\' EXIT\n'
+            'unset ZDOTDIR\n'
+            '[ -f "$HOME/.zshrc" ] && . "$HOME/.zshrc"\n'
+            'PROMPT="%F{yellow}(space)%f $PROMPT"\n'
+        )
+    os.chown(zshrc, pw.pw_uid, pw.pw_gid)
+    return tmpdir
+
+
 def run_internet_shell(username: str, shell: str = "/bin/bash") -> subprocess.Popen:
     """
     Enter the internet namespace and launch an interactive shell as username.
@@ -793,8 +828,23 @@ def run_internet_shell(username: str, shell: str = "/bin/bash") -> subprocess.Po
     Returns the Popen object (caller should call .wait()).
     """
     netns_name = load_config()["netns_name"]
-    preserve = ",".join(_PRESERVED_ENV_VARS)
+    shell_name = os.path.basename(shell)
+
+    extra_shell_args: list = []
+    extra_preserve: list = ["SPACE_SHELL"]
+    extra_env: dict = {"SPACE_SHELL": "1"}
+
+    if shell_name in ("bash", "sh"):
+        extra_shell_args = ["--rcfile", _make_bash_rcfile(username)]
+    elif shell_name == "zsh":
+        zdotdir = _make_zsh_zdotdir(username)
+        extra_env["ZDOTDIR"] = zdotdir
+        extra_preserve.append("ZDOTDIR")
+
+    preserve = ",".join(_PRESERVED_ENV_VARS + extra_preserve)
     return subprocess.Popen(
         ["ip", "netns", "exec", netns_name,
-         "sudo", "-u", username, f"--preserve-env={preserve}", "--", shell],
+         "sudo", "-u", username, f"--preserve-env={preserve}", "--",
+         shell, *extra_shell_args],
+        env={**os.environ, **extra_env},
     )
