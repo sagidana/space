@@ -39,6 +39,24 @@ def need_init(config):
         sys.exit(1)
 
 
+def _has_sessions() -> bool:
+    return bool(firewall.list_sessions())
+
+
+def _kill_active_sessions(notify: bool = True) -> int:
+    """Kill all active sessions. Returns count killed."""
+    sessions = firewall.list_sessions()
+    if not sessions:
+        return 0
+    if notify:
+        console.print(f"[yellow]Stopping {len(sessions)} active session(s)...[/yellow]")
+    killed = 0
+    for s in sessions:
+        success, _ = firewall.kill_session(s["id"])
+        if success:
+            killed += 1
+    return killed
+
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -62,6 +80,10 @@ def init():
     """First-time setup: detect subnet, create group, apply firewall rules."""
     ensure_root()
     config = load_config()
+
+    n = _kill_active_sessions()
+    if n:
+        console.print(f"[yellow]Stopped {n} active session(s) before re-initializing.[/yellow]")
 
     console.print("\n[bold cyan]space — internet isolation setup[/bold cyan]\n")
 
@@ -179,6 +201,11 @@ def on():
     ensure_root()
     config = load_config()
     need_init(config)
+    if _has_sessions():
+        console.print("[yellow]Warning: active sessions will lose internet access when blocking rules are re-applied.[/yellow]")
+        if not Confirm.ask("Kill active sessions and continue?", default=True):
+            return
+        _kill_active_sessions(notify=False)
     firewall.apply_rules(config["subnets"], config["group"])
     console.print("[green]✓ Internet blocking enabled.[/green]")
 
@@ -189,6 +216,10 @@ def off():
     ensure_root()
     config = load_config()
     need_init(config)
+
+    if _has_sessions():
+        sessions = firewall.list_sessions()
+        console.print(f"[yellow]Note: {len(sessions)} active session(s) will remain running with internet access.[/yellow]")
 
     if not Confirm.ask(
         "[yellow]This allows unrestricted internet access. Continue?[/yellow]",
@@ -398,6 +429,12 @@ def subnet():
     config = load_config()
     need_init(config)
 
+    if _has_sessions():
+        console.print("[yellow]Warning: active sessions will lose internet access when rules are re-applied.[/yellow]")
+        if not Confirm.ask("Kill active sessions and continue?", default=True):
+            return
+        _kill_active_sessions(notify=False)
+
     detected = get_local_subnets()
     current = config.get("subnets", [])
 
@@ -455,6 +492,7 @@ def panic():
     No confirmation prompt — runs immediately.
     """
     ensure_root()
+    _kill_active_sessions()
     firewall.panic_flush()
     console.print("[green]✓ All rules cleared. Full internet access restored.[/green]")
 
@@ -471,6 +509,10 @@ def uninstall():
         default=False,
     ):
         return
+
+    n = _kill_active_sessions()
+    if n:
+        console.print(f"[green]✓[/green] Stopped {n} active session(s).")
 
     firewall.remove_rules()
     console.print("[green]✓ Firewall rules removed.[/green]")
